@@ -1,0 +1,16 @@
+{
+  "appId": "com.routine.app",
+  "appName": "My Routine",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": false
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon",
+      "iconColor": "#f5a623",
+      "sound": "default"
+    }
+  }
+}
