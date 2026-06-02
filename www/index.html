@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Routine">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' capacitor: https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' capacitor: https: http://localhost;">
   <title>Routine Tracker</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
@@ -44,6 +44,7 @@ body{background:var(--bg);font-family:var(--font);color:var(--text);min-block-si
 .nav-tab{flex:none;background:none;border:none;color:var(--text3);font-family:var(--font);font-size:13px;font-weight:600;padding:10px 16px;cursor:pointer;border-block-end:2px solid transparent;transition:color .15s,border-color .15s;white-space:nowrap}
 .nav-tab.active{color:var(--accent);border-block-end-color:var(--accent)}
 .nav-tab[data-tab="edit"].active{color:#ff9f43;border-block-end-color:#ff9f43}
+.nav-tab[data-tab="templates"].active{color:#a78bfa;border-block-end-color:#a78bfa}
 
 /* ── MAIN ───────────────────────────────── */
 .main{padding:16px;padding-block-end:calc(76px + var(--safe-bottom))}
@@ -214,6 +215,7 @@ body{background:var(--bg);font-family:var(--font);color:var(--text);min-block-si
     <button class="nav-tab" data-tab="backdate">Backdate</button>
     <button class="nav-tab" data-tab="edit">Edit Routine</button>
     <button class="nav-tab" data-tab="stats">Stats</button>
+    <button class="nav-tab" data-tab="templates">Templates</button>
   </div>
 </div>
 
@@ -230,9 +232,16 @@ body{background:var(--bg);font-family:var(--font);color:var(--text);min-block-si
     <div class="form-row">
       <input class="form-input" id="modalName" placeholder="Task name (e.g. Morning run)" autocomplete="off">
     </div>
-    <div class="form-row">
-      <input class="form-input" id="modalTime" placeholder="Time (e.g. 06:00 - 07:30)" style="flex:3" autocomplete="off">
-      <select class="form-input" id="modalType" style="flex:2">
+    <div class="form-row" style="align-items:flex-end">
+      <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+        <span style="font-size:10px;color:var(--text3);font-weight:600;letter-spacing:.05em;text-transform:uppercase">Start</span>
+        <input type="time" class="form-input" id="modalStartTime" style="color-scheme:dark">
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+        <span style="font-size:10px;color:var(--text3);font-weight:600;letter-spacing:.05em;text-transform:uppercase">End (opt)</span>
+        <input type="time" class="form-input" id="modalEndTime" style="color-scheme:dark">
+      </div>
+      <select class="form-input" id="modalType" style="flex:1">
         <option value="prayer">Prayer</option>
         <option value="health">Health</option>
         <option value="study">Study</option>
@@ -337,9 +346,11 @@ const BP={
 };
 
 // ── STATE ─────────────────────────────────────
-let custom={}, comp={}, streak={};
+let custom={}, comp={}, streak={}, templates={};
 let tab="today", bdStr="", edStr="";
 let editingTask=null;
+let editingTemplateTask=null;
+let templateDay="";
 let ctxOpen=null;
 let isCapacitor=false;
 let notifPermissionGranted=false;
@@ -352,12 +363,14 @@ function load(){
     comp=JSON.parse(localStorage.getItem("rt_comp")||"{}");
     streak=JSON.parse(localStorage.getItem("rt_streak")||"{}");
     scheduledCount=parseInt(localStorage.getItem("rt_notif_count")||"0");
+    templates=JSON.parse(localStorage.getItem("rt_templates")||"{}");
   }catch(e){}
 }
 function save(){
   localStorage.setItem("rt_custom",JSON.stringify(custom));
   localStorage.setItem("rt_comp",JSON.stringify(comp));
   localStorage.setItem("rt_streak",JSON.stringify(streak));
+  localStorage.setItem("rt_templates",JSON.stringify(templates));
   localStorage.setItem("rt_notif_count",String(scheduledCount));
 }
 
@@ -369,7 +382,7 @@ function todayStr(){
 function pad(n){return String(n).padStart(2,'0')}
 function parseSafe(s){const[y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d)}
 function dayOf(s){return DAYS[parseSafe(s).getDay()]}
-function getTasks(ds,dn){return custom[`${ds}_${dn}`]?[...custom[`${ds}_${dn}`]]:[...(BP[dn]||[])]}
+function getTasks(ds,dn){if(custom[`${ds}_${dn}`]) return [...custom[`${ds}_${dn}`]]; if(templates[dn]) return [...templates[dn]]; return [...(BP[dn]||[])]}
 function tk(ds,dn,i){return `${ds}_${dn}_${i}`}
 function isDone(ds,dn,i){return !!comp[tk(ds,dn,i)]?.done}
 function getTs(ds,dn,i){return comp[tk(ds,dn,i)]?.ts||null}
@@ -386,13 +399,91 @@ function parseStartMinutes(timeStr){
     if(mer==='AM'&&h===12)h=0;
     return h*60+min;
   }
-  // "HH:MM - HH:MM" (24hr range, uses en-dash or hyphen)
-  m=s.match(/^(\d{1,2}):(\d{2})/);
+  // "HH:MM - HH:MM" (range, might be 12hr or 24hr style)
+  // Heuristic: if both hours <= 12 and no AM/PM, treat as 24hr for morning tasks,
+  // but if start hour is <= 12 and end hour is < start hour, end is PM.
+  // e.g. "12:00 - 02:30" means 12:00 to 14:30 (noon to 2:30 PM)
+  //      "10:20 - 11:50" means 10:20 to 11:50 (morning)
+  m=s.match(/^(\d{1,2}):(\d{2})\s*[-\u2013]\s*(\d{1,2}):(\d{2})/);
+  if(m){
+    let h=parseInt(m[1]),min=parseInt(m[2]);
+    let endH=parseInt(m[3]);
+    // If start hour < 12 and end hour < start hour, it wraps to PM
+    // e.g. start=12, end=02 => start is 12 (noon), end is 14 (2 PM)
+    // Just return start time - only the start matters for reminders
+    if(h === 12 && endH < 12) {
+      // "12:00 - 02:30" => 12:00 PM (noon)
+      return 12*60+min; // 12 PM = 720 + min
+    }
+    if(h < 12 && endH < h) {
+      // e.g. "06:10 - 01:30" unlikely but treat start as AM
+      return h*60+min;
+    }
+    return h*60+min;
+  }
+  // Plain "HH:MM" (no AM/PM, no range)
+  m=s.match(/^(\d{1,2}):(\d{2})$/);
   if(m){
     let h=parseInt(m[1]),min=parseInt(m[2]);
     return h*60+min;
   }
   return null;
+}
+
+// ── TIME INPUT HELPERS ──────────────────────────
+function parseTimeForInput(timeStr){
+  const s=timeStr.trim();
+  let startMins=parseStartMinutes(s);
+  if(startMins===null) return {start:'',end:''};
+  const startH=Math.floor(startMins/60),startM=startMins%60;
+  const start=pad(startH)+':'+pad(startM);
+  // Try to extract end time
+  let endMins=null;
+  // "HH:MM AM/PM - HH:MM AM/PM"
+  let m=s.match(/[-\u2013]\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if(m){
+    let h=parseInt(m[1]),min=parseInt(m[2]),mer=m[3].toUpperCase();
+    if(mer==='PM'&&h!==12)h+=12;
+    if(mer==='AM'&&h===12)h=0;
+    endMins=h*60+min;
+  } else {
+    // "HH:MM - HH:MM" (no AM/PM on end)
+    m=s.match(/[-\u2013]\s*(\d{1,2}):(\d{2})\s*$/);
+    if(m){
+      let h=parseInt(m[1]),min=parseInt(m[2]);
+      if(h<startH&&startH<12) h+=12;
+      if(startH===12&&h<12) h+=12;
+      endMins=h*60+min;
+    }
+  }
+  const end=endMins!==null?pad(Math.floor(endMins/60))+':'+pad(endMins%60):'';
+  return {start,end};
+}
+
+function formatTimeFromInputs(startVal,endVal){
+  if(!startVal) return '';
+  const [sh,sm]=startVal.split(':').map(Number);
+  const sAMPM=sh>=12?'PM':'AM';
+  const sh12=sh%12||12;
+  let result=pad(sh12)+':'+pad(sm)+' '+sAMPM;
+  if(endVal){
+    const [eh,em]=endVal.split(':').map(Number);
+    const eAMPM=eh>=12?'PM':'AM';
+    const eh12=eh%12||12;
+    result+=' - '+pad(eh12)+':'+pad(em)+' '+eAMPM;
+  }
+  return result;
+}
+
+function sortTasksByTime(tasks){
+  tasks.sort((a,b)=>{
+    const ma=parseStartMinutes(a.time);
+    const mb=parseStartMinutes(b.time);
+    if(ma===null&&mb===null) return 0;
+    if(ma===null) return 1;
+    if(mb===null) return -1;
+    return ma-mb;
+  });
 }
 
 // ── COMPLETION ────────────────────────────────
@@ -464,22 +555,64 @@ function render(){
   else if(tab==='backdate'){
     bar.className='bottom-bar';
     if(!bdStr){const y=new Date();y.setDate(y.getDate()-1);bdStr=`${y.getFullYear()}-${pad(y.getMonth()+1)}-${pad(y.getDate())}`}
-    main.innerHTML=`<div class="panel"><div class="panel-title">Select past date</div><input type="date" class="date-input" id="bdPick" value="${bdStr}" max="${today}"></div>`;
-    document.getElementById('bdPick').onchange=e=>{bdStr=e.target.value;render()};
-    renderDay(main,bdStr,dayOf(bdStr),false);
+    // Separate picker panel from content so we don't destroy the date input on date change
+    // Android WebView: destroying the date input while the native picker dialog is open
+    // disconnects it, causing the value to not commit properly
+    main.innerHTML=`<div id="bdPickerPanel" class="panel"><div class="panel-title">Select past date</div><input type="date" class="date-input" id="bdPick" max="${today}"></div><div id="bdContent"></div>`;
+    const bdEl=document.getElementById('bdPick');
+    bdEl.value=bdStr;
+    let bdLastEvent=0; // deduplicate 'input' and 'change' firing together
+    const bdHandler=e=>{
+      const now=Date.now();
+      if(now-bdLastEvent<150)return; // debounce duplicate events
+      bdLastEvent=now;
+      const v=e.target.value;
+      if(v&&v!==bdStr){
+        bdStr=v;
+        // Only refresh the content area — do NOT destroy the date picker!
+        const ct=document.getElementById('bdContent');
+        if(ct){ct.innerHTML='';renderDay(ct,bdStr,dayOf(bdStr),false);}
+      }
+    };
+    bdEl.addEventListener('change',bdHandler);
+    bdEl.addEventListener('input',bdHandler);
+    renderDay(document.getElementById('bdContent'),bdStr,dayOf(bdStr),false);
   }
   else if(tab==='edit'){
     bar.className='bottom-bar show';
     if(!edStr)edStr=today;
     bar.innerHTML=`<button class="btn-secondary" onclick="resetDay()">Reset Day</button><button class="btn-primary" onclick="openAdd()">+ Add Task</button>`;
-    main.innerHTML=`<div class="panel"><div class="panel-title">Choose day to edit</div><input type="date" class="date-input" id="edPick" value="${edStr}"></div>`;
-    document.getElementById('edPick').onchange=e=>{edStr=e.target.value;render()};
-    renderEditList(main,edStr,dayOf(edStr));
+    // Separate picker panel from content so we don't destroy the date input on date change
+    main.innerHTML=`<div id="edPickerPanel" class="panel"><div class="panel-title">Choose day to edit</div><input type="date" class="date-input" id="edPick"></div><div id="edContent"></div>`;
+    const edEl=document.getElementById('edPick');
+    edEl.value=edStr;
+    let edLastEvent=0; // deduplicate 'input' and 'change' firing together
+    const edHandler=e=>{
+      const now=Date.now();
+      if(now-edLastEvent<150)return; // debounce duplicate events
+      edLastEvent=now;
+      const v=e.target.value;
+      if(v&&v!==edStr){
+        edStr=v;
+        // Only refresh the content area — do NOT destroy the date picker!
+        const ct=document.getElementById('edContent');
+        if(ct){ct.innerHTML='';renderEditList(ct,edStr,dayOf(edStr));}
+      }
+    };
+    edEl.addEventListener('change',edHandler);
+    edEl.addEventListener('input',edHandler);
+    renderEditList(document.getElementById('edContent'),edStr,dayOf(edStr));
   }
   else if(tab==='stats'){
     bar.className='bottom-bar show';
     bar.innerHTML=`<button class="btn-secondary" onclick="dlCSV()">Export CSV</button><button class="btn-danger" onclick="doReset()">Reset All</button>`;
     renderStats(main);
+  }
+  else if(tab==='templates'){
+    bar.className='bottom-bar show';
+    if(!templateDay) templateDay=DAYS[new Date().getDay()];
+    bar.innerHTML=`<button class="btn-secondary" onclick="resetTemplateDay()">Reset to Default</button><button class="btn-primary" onclick="openAddTemplate()">+ Add Task</button>`;
+    renderTemplates(main);
   }
 }
 
@@ -517,14 +650,44 @@ function renderDay(c,ds,dn,_edit){
   let notifBar='';
   if(ds===today){
     if(isCapacitor){
-      const permLabel = notifPermissionGranted ? 'Allowed' : 'Not allowed';
-      const permIcon = notifPermissionGranted ? 'check' : 'bell';
-      const countLabel = scheduledCount > 0 ? `${scheduledCount} reminders scheduled for today` : 'No reminders scheduled';
+      const permLabel = notifPermissionGranted ? 'On' : 'Off';
+      // Calculate next upcoming reminder
+      let nextReminderText = '';
+      if(notifPermissionGranted && scheduledCount > 0){
+        const now=new Date();
+        const tasks_list=getTasks(ds,dn);
+        let nextTask=null, nextFireTime=null;
+        tasks_list.forEach((t,i)=>{
+          const startMins=parseStartMinutes(t.time);
+          if(startMins===null) return;
+          const remindAtMins=Math.max(0,startMins-REMIND_MINUTES_BEFORE);
+          const fireDate=new Date(now.getFullYear(),now.getMonth(),now.getDate(),Math.floor(remindAtMins/60),remindAtMins%60,0);
+          if(fireDate.getTime()>now.getTime()){
+            if(!nextFireTime||fireDate.getTime()<nextFireTime.getTime()){nextFireTime=fireDate;nextTask=t}
+          }
+        });
+        if(nextTask&&nextFireTime){
+          const h=nextFireTime.getHours(),m=nextFireTime.getMinutes();
+          const ampm=h>=12?'PM':'AM';
+          const h12=h%12||12;
+          nextReminderText=`Next: ${nextTask.name} at ${h12}:${pad(m)} ${ampm}`;
+        } else {
+          nextReminderText='All tasks for today have passed';
+        }
+      } else if(!notifPermissionGranted){
+        nextReminderText='Tap Reminders button to enable';
+      } else {
+        nextReminderText='Tap Schedule to set reminders';
+      }
       notifBar=`<div class="notif-status">
         <div class="notif-status-row">
           <div class="notif-status-icon">${notifPermissionGranted?'🔔':'🔕'}</div>
-          <div class="notif-status-text"><strong>Reminders: ${permLabel}</strong>${countLabel}</div>
-          <button class="notif-schedule-btn${notifPermissionGranted?'':' disabled'}" onclick="scheduleTodayReminders()">Schedule</button>
+          <div class="notif-status-text"><strong>Reminders: ${permLabel} (${scheduledCount} scheduled)</strong>${nextReminderText}</div>
+        </div>
+        <div class="notif-status-row" style="margin-top:8px">
+          <button class="notif-schedule-btn" onclick="testNotification()" style="margin-right:4px;background:var(--teal)">Test (30s)</button>
+          <button class="notif-schedule-btn${notifPermissionGranted?'':' disabled'}" onclick="scheduleTodayReminders()" style="flex:1">Schedule Today</button>
+          <button class="notif-schedule-btn" onclick="showDebugInfo()" style="background:var(--surface3);color:var(--text2)">Debug</button>
         </div>
       </div>`;
     } else {
@@ -703,32 +866,60 @@ function closeCtx(){
 // ── MODAL ─────────────────────────────────────
 function openAdd(){
   editingTask=null;
+  editingTemplateTask=null;
   document.getElementById('modalTitle').textContent='Add Task';
   document.getElementById('modalName').value='';
-  document.getElementById('modalTime').value='';
+  document.getElementById('modalStartTime').value='';
+  document.getElementById('modalEndTime').value='';
   document.getElementById('modalType').value='study';
   document.getElementById('taskModal').classList.add('show');
-  setTimeout(()=>document.getElementById('modalName').focus(),120);
+  setTimeout(()=>document.getElementById('modalStartTime').focus(),120);
 }
 function openEdit(ds,dn,i){
   const t=getTasks(ds,dn)[i];
   editingTask={ds,dn,i};
+  editingTemplateTask=null;
   document.getElementById('modalTitle').textContent='Edit Task';
   document.getElementById('modalName').value=t.name;
-  document.getElementById('modalTime').value=t.time;
+  const parsed=parseTimeForInput(t.time);
+  document.getElementById('modalStartTime').value=parsed.start;
+  document.getElementById('modalEndTime').value=parsed.end;
   document.getElementById('modalType').value=t.type;
   document.getElementById('taskModal').classList.add('show');
 }
 function closeModal(){document.getElementById('taskModal').classList.remove('show')}
 function saveModal(){
   const name=document.getElementById('modalName').value.trim();
-  const time=document.getElementById('modalTime').value.trim();
+  const startVal=document.getElementById('modalStartTime').value;
+  const endVal=document.getElementById('modalEndTime').value;
   const type=document.getElementById('modalType').value;
   if(!name){toast('Enter a task name',true);return}
+  if(!startVal){toast('Set a start time',true);return}
+  const time=formatTimeFromInputs(startVal,endVal);
+
+  // Handle template saving
+  if(editingTemplateTask){
+    const dn=editingTemplateTask.dn;
+    if(!templates[dn])templates[dn]=[...(BP[dn]||[])];
+    if(editingTemplateTask.i!==null&&editingTemplateTask.i!==undefined){
+      templates[dn][editingTemplateTask.i]={name,time,type};
+      toast('Template task updated');
+    } else {
+      templates[dn].push({name,time,type});
+      toast('Template task added');
+    }
+    sortTasksByTime(templates[dn]);
+    editingTemplateTask=null;
+    save();closeModal();render();
+    return;
+  }
+
+  // Regular (date-specific) task saving
   const ds=edStr||todayStr(), dn=dayOf(ds), key=`${ds}_${dn}`;
-  if(!custom[key])custom[key]=[...(BP[dn]||[])];
+  if(!custom[key])custom[key]=[...getTasks(ds,dn)];
   if(editingTask){custom[key][editingTask.i]={name,time,type};toast('Task updated')}
   else{custom[key].push({name,time,type});toast('Task added')}
+  sortTasksByTime(custom[key]);
   save();closeModal();render();
   // Re-schedule reminders if editing today
   if(ds===todayStr()&&notifPermissionGranted&&isCapacitor){
@@ -738,7 +929,7 @@ function saveModal(){
 function delTask(ds,dn,i){
   if(!confirm('Delete this task?'))return;
   const key=`${ds}_${dn}`;
-  if(!custom[key])custom[key]=[...(BP[dn]||[])];
+  if(!custom[key])custom[key]=[...getTasks(ds,dn)];
   custom[key].splice(i,1);
   delete comp[tk(ds,dn,i)];
   save();render();toast('Deleted');
@@ -751,6 +942,141 @@ function resetDay(){
   if(!confirm(`Reset ${dn} to default?`))return;
   delete custom[`${ds}_${dn}`];
   save();render();toast('Reset to default');
+}
+
+// ── TEMPLATES ──────────────────────────────────
+function renderTemplates(c){
+  const dn=templateDay;
+  const tasks=templates[dn]?[...templates[dn]]:[...(BP[dn]||[])];
+  const isCustom=!!templates[dn];
+  const dayAbbr=DAYS.map(d=>d.slice(0,3));
+
+  let html=`<div class="panel" style="margin-block-end:12px">
+    <div class="panel-title">Default routine for each day of the week</div>
+    <p style="font-size:12px;color:var(--text3);margin-block-end:10px">Templates apply to ALL future dates of that day. Priority: date-specific edit &gt; template &gt; default.</p>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">`;
+
+  DAYS.forEach((day,idx)=>{
+    const sel=day===dn;
+    const hasTemplate=!!templates[day];
+    html+=`<button onclick="selectTemplateDay('${day}')" style="background:${sel?'#a78bfa':'var(--surface2)'};border:1px solid ${sel?'#a78bfa':'var(--border2)'};color:${sel?'#0d1b2a':'var(--text2)'};font-family:var(--font);font-size:12px;font-weight:600;padding:7px 12px;border-radius:20px;cursor:pointer;position:relative;white-space:nowrap">${dayAbbr[idx]}${hasTemplate?' <span style="display:inline-block;width:6px;height:6px;background:#a78bfa;border-radius:50%;vertical-align:middle;margin-left:2px"></span>':''}</button>`;
+  });
+
+  html+=`</div></div>`;
+
+  if(isCustom){
+    html+=`<div style="display:inline-flex;align-items:center;gap:4px;background:rgba(167,139,250,.12);color:#a78bfa;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;border-radius:10px;margin-block-end:8px">Custom template</div>`;
+  }
+
+  if(!tasks.length){
+    html+=`<div class="empty-state"><div class="ei">📋</div><p>No tasks for ${esc(dn)}.<br>Tap "+ Add Task" below.</p></div>`;
+  } else {
+    html+=`<div class="section-label">Swipe left or tap ... to edit/delete</div>`;
+    tasks.forEach((t,i)=>{
+      html+=`
+      <div class="swipe-wrap" id="tsw${i}">
+        <div class="swipe-reveal"><button class="swipe-del-btn" onclick="delTemplateTask('${dn}',${i})"><span class="swipe-del-icon">🗑</span><span>Delete</span></button></div>
+        <div class="edit-item" id="tei${i}" data-idx="${i}">
+          <div class="edit-item-icon">${t.name.match(/^\p{Emoji}/u)?.[0]||'📌'}</div>
+          <div class="edit-item-meta">
+            <div class="edit-item-name">${esc(t.name.replace(/^\p{Emoji}\s*/u,''))}</div>
+            <div class="edit-item-time">${esc(t.time)}</div>
+            <div class="edit-item-type badge-${t.type}" style="display:inline-block;font-size:9px;font-weight:700;padding:2px 6px;border-radius:10px;margin-block-start:2px">${t.type}</div>
+          </div>
+          <div class="edit-kebab" onclick="openTemplateCtx(event,'${dn}',${i})">⋮</div>
+        </div>
+      </div>`;
+    });
+  }
+  c.innerHTML=html;
+  tasks.forEach((_,i)=>attachTemplateSwipe(i));
+}
+
+function attachTemplateSwipe(i){
+  const el=document.getElementById(`tei${i}`);
+  const wrap=document.getElementById(`tsw${i}`);
+  if(!el||!wrap)return;
+  let startX=0,curX=0;
+  el.addEventListener('touchstart',e=>{startX=e.touches[0].clientX},{passive:true});
+  el.addEventListener('touchmove',e=>{
+    curX=e.touches[0].clientX;
+    const dx=startX-curX;
+    if(dx>8){el.style.transform=`translateX(${Math.max(-90,-dx)}px)`;el.style.transition='none'}
+    else if(dx<-4){el.style.transform='translateX(0)';el.style.transition='transform .2s'}
+  },{passive:true});
+  el.addEventListener('touchend',()=>{
+    el.style.transition='transform .2s';
+    const dx=startX-curX;
+    if(dx>50){el.style.transform='translateX(-90px)'}
+    else{el.style.transform='translateX(0)'}
+  });
+}
+
+function openTemplateCtx(e,dn,i){
+  e.stopPropagation();
+  closeCtx();
+  const btn=e.currentTarget;
+  const rect=btn.getBoundingClientRect();
+  const backdrop=document.createElement('div');
+  backdrop.className='ctx-backdrop';
+  backdrop.onclick=closeCtx;
+  const menu=document.createElement('div');
+  menu.className='ctx-menu';
+  menu.id='ctxMenu';
+  menu.innerHTML=`
+    <div class="ctx-item" onclick="openEditTemplate('${dn}',${i});closeCtx()">Edit task</div>
+    <div class="ctx-item danger" onclick="delTemplateTask('${dn}',${i});closeCtx()">Delete</div>`;
+  const top=Math.min(rect.bottom+6, window.innerHeight-130);
+  const right=window.innerWidth-rect.right;
+  menu.style.cssText=`inset-block-start:${top}px;inset-inline-end:${right}px`;
+  document.body.appendChild(backdrop);
+  document.body.appendChild(menu);
+  ctxOpen={backdrop,menu};
+}
+
+function selectTemplateDay(dn){
+  templateDay=dn;
+  render();
+}
+
+function openAddTemplate(){
+  editingTemplateTask={dn:templateDay,i:null};
+  editingTask=null;
+  document.getElementById('modalTitle').textContent='Add Template Task';
+  document.getElementById('modalName').value='';
+  document.getElementById('modalStartTime').value='';
+  document.getElementById('modalEndTime').value='';
+  document.getElementById('modalType').value='study';
+  document.getElementById('taskModal').classList.add('show');
+  setTimeout(()=>document.getElementById('modalStartTime').focus(),120);
+}
+
+function openEditTemplate(dn,i){
+  const tasks=templates[dn]?templates[dn]:BP[dn]||[];
+  const t=tasks[i];
+  editingTemplateTask={dn,i};
+  editingTask=null;
+  document.getElementById('modalTitle').textContent='Edit Template Task';
+  document.getElementById('modalName').value=t.name;
+  const parsed=parseTimeForInput(t.time);
+  document.getElementById('modalStartTime').value=parsed.start;
+  document.getElementById('modalEndTime').value=parsed.end;
+  document.getElementById('modalType').value=t.type;
+  document.getElementById('taskModal').classList.add('show');
+}
+
+function delTemplateTask(dn,i){
+  if(!confirm('Delete this template task?'))return;
+  if(!templates[dn])templates[dn]=[...(BP[dn]||[])];
+  templates[dn].splice(i,1);
+  save();render();toast('Template task deleted');
+}
+
+function resetTemplateDay(){
+  const dn=templateDay;
+  if(!confirm(`Reset ${dn} template to default?`))return;
+  delete templates[dn];
+  save();render();toast('Template reset to default');
 }
 
 // ── STATS ─────────────────────────────────────
@@ -795,7 +1121,7 @@ function renderStats(c){
 }
 
 // ── CSV ───────────────────────────────────────
-function dlCSV(){
+async function dlCSV(){
   const keys=Object.keys(comp).filter(k=>comp[k]?.done).sort();
   let csv='Date,Day,Task,Type,Completed At\n';
   keys.forEach(k=>{
@@ -803,6 +1129,47 @@ function dlCSV(){
     const t=getTasks(ds,dn)[i];
     if(t)csv+=`"${ds}","${dn}","${t.name.replace(/"/g,"'")}","${t.type}","${e.full||e.ts}"\n`;
   });
+  // Capacitor: try share API first
+  if(isCapacitor && navigator.share){
+    try{
+      await navigator.share({
+        title:'Routine Data',
+        text:csv,
+      });
+      toast('CSV shared!');
+      return;
+    }catch(e){
+      if(e.name==='AbortError'){toast('Share cancelled');return;}
+      // Fall through to modal
+    }
+  }
+  // Capacitor fallback or if share failed: show copyable textarea
+  if(isCapacitor){
+    const overlay=document.createElement('div');
+    overlay.className='modal-overlay show';
+    overlay.style.zIndex='500';
+    overlay.innerHTML=`<div class="modal">
+      <div class="modal-handle"></div>
+      <div class="modal-title">Export CSV</div>
+      <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Copy the CSV below and paste into any spreadsheet app</p>
+      <textarea style="width:100%;height:180px;background:var(--surface3);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:12px;font-family:var(--mono);font-size:11px;resize:none" id="csvText" readonly></textarea>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn-primary" style="flex:1" id="csvCopyBtn">Copy to Clipboard</button>
+        <button class="btn-secondary" id="csvCloseBtn">Close</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    document.getElementById('csvText').value=csv;
+    document.getElementById('csvCopyBtn').onclick=()=>{
+      const ta=document.getElementById('csvText');
+      ta.select();
+      navigator.clipboard.writeText(ta.value).then(()=>toast('Copied to clipboard!')).catch(()=>{document.execCommand('copy');toast('Copied!');});
+    };
+    document.getElementById('csvCloseBtn').onclick=()=>overlay.remove();
+    overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};
+    return;
+  }
+  // Browser: traditional download
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv'}));
   a.download=`routine_${todayStr()}.csv`;a.click();
@@ -887,7 +1254,7 @@ async function requestCapacitorPermission(){
       notifPermissionGranted=true;
       await scheduleTodayReminders();
       render();
-      toast('Reminders enabled!');
+      // Toast is already shown by scheduleTodayReminders with next reminder info
     } else {
       notifPermissionGranted=false;
       toast('Permission denied — check app settings',true);
@@ -903,7 +1270,10 @@ async function scheduleTodayReminders(){
   if(!isCapacitor||!notifPermissionGranted) return;
   try{
     const LocalNotifications = getLocalNotifications();
-    if(!LocalNotifications) return;
+    if(!LocalNotifications){
+      toast('Notifications plugin not found!',true);
+      return;
+    }
 
     const ds=todayStr(), dn=dayOf(ds), tasks=getTasks(ds,dn);
     const notifications=[];
@@ -913,10 +1283,13 @@ async function scheduleTodayReminders(){
     try{
       const pending=await LocalNotifications.getPending();
       if(pending && pending.notifications && pending.notifications.length>0){
-        await LocalNotifications.cancel(pending);
+        // cancel() expects {notifications: [{id: number}, ...]}
+        const toCancel = pending.notifications.map(n => ({id: n.id}));
+        await LocalNotifications.cancel({notifications: toCancel});
+        console.log('Cancelled', toCancel.length, 'pending notifications');
       }
     }catch(e){
-      console.log('No pending notifications to cancel');
+      console.log('Cancel error (may be ok):', e);
     }
 
     tasks.forEach((t,i)=>{
@@ -941,25 +1314,83 @@ async function scheduleTodayReminders(){
         body: t.name + ' (' + t.time + ')',
         id: notifId,
         schedule: { at: fireDate },
-        sound: undefined,
-        smallIcon: 'ic_stat_icon',
-        iconColor: '#f5a623',
+        // Do NOT set sound/smallIcon/iconColor here —
+        // they come from capacitor.config.json.
+        // Setting sound:undefined or a bad icon causes silent failure on IQOO/OriginOS.
         extra: { taskIndex: i, dateStr: ds, dayName: dn }
       });
     });
 
     if(notifications.length>0){
+      console.log('Scheduling', notifications.length, 'notifications:', 
+        notifications.map(n => ({id: n.id, title: n.title, at: n.schedule.at?.toISOString()})));
       await LocalNotifications.schedule({notifications});
+      // Verify they were actually scheduled
+      try{
+        const verify=await LocalNotifications.getPending();
+        console.log('Verification: pending count =', verify?.notifications?.length || 0);
+      }catch(ve){console.log('Verify error:', ve)}
       scheduledCount=notifications.length;
+      // Store the list of scheduled reminder times for display
+      const reminderTimes=notifications.map(n=>({
+        title:n.body,
+        time:n.schedule.at
+      }));
+      localStorage.setItem("rt_reminder_times",JSON.stringify(reminderTimes));
     } else {
       scheduledCount=0;
+      localStorage.removeItem("rt_reminder_times");
     }
     save();
     render();
-    toast(scheduledCount + ' reminders scheduled for today');
+    if(scheduledCount>0){
+      // Find the next one for the toast message
+      const now2=new Date();
+      const next=notifications.find(n=>new Date(n.schedule.at).getTime()>now2.getTime());
+      if(next){
+        const fd=new Date(next.schedule.at);
+        const ampm2=fd.getHours()>=12?'PM':'AM';
+        const h122=fd.getHours()%12||12;
+        toast(scheduledCount + ' reminders set! Next: ' + h122 + ':' + pad(fd.getMinutes()) + ' ' + ampm2);
+      } else {
+        toast(scheduledCount + ' reminders scheduled');
+      }
+    } else {
+      toast('No upcoming tasks to remind about',true);
+    }
   }catch(err){
     console.error('Schedule error:',err);
     toast('Failed to schedule: ' + err.message, true);
+  }
+}
+
+// ── Test notification (fires 30 seconds from now) ──
+async function testNotification(){
+  try{
+    const LocalNotifications = getLocalNotifications();
+    if(!LocalNotifications){
+      toast('Plugin not available!',true);
+      return;
+    }
+    // Check permission first
+    const perm=await LocalNotifications.checkPermissions();
+    if(perm.display!=='granted'){
+      toast('Permission not granted yet',true);
+      return;
+    }
+    const fireDate=new Date(Date.now()+30000); // 30 sec from now
+    await LocalNotifications.schedule({
+      notifications:[{
+        title:'Routine Test',
+        body:'If you see this, notifications work!',
+        id:99999,
+        schedule:{at:fireDate}
+      }]
+    });
+    toast('Test notification set! Check in 30 seconds...');
+  }catch(err){
+    console.error('Test notification error:',err);
+    toast('Test failed: '+err.message,true);
   }
 }
 
@@ -978,19 +1409,63 @@ function setupNotificationListeners(){
   }
 }
 
+// ── Debug info (helps troubleshoot notification issues) ──
+async function showDebugInfo(){
+  const lines=[];
+  lines.push('isCapacitor: ' + isCapacitor);
+  lines.push('notifPermissionGranted: ' + notifPermissionGranted);
+  lines.push('scheduledCount: ' + scheduledCount);
+  try{
+    const cap = window.Capacitor;
+    lines.push('window.Capacitor exists: ' + !!cap);
+    if(cap){
+      lines.push('isNative: ' + (cap.isNativePlatform?.() ?? 'N/A'));
+      lines.push('platform: ' + (cap.getPlatform?.() ?? 'N/A'));
+      lines.push('Plugins keys: ' + (cap.Plugins ? Object.keys(cap.Plugins).join(', ') : 'none'));
+      lines.push('PluginHeaders: ' + JSON.stringify(cap.PluginHeaders?.map(p=>p.name) || []));
+    }
+    const LN = getLocalNotifications();
+    lines.push('LocalNotifications plugin: ' + (LN ? 'FOUND' : 'NOT FOUND'));
+    if(LN){
+      const perm = await LN.checkPermissions();
+      lines.push('Permission: ' + JSON.stringify(perm));
+      const pending = await LN.getPending();
+      lines.push('Pending count: ' + (pending?.notifications?.length ?? 0));
+      if(pending?.notifications?.length > 0){
+        pending.notifications.forEach(n => {
+          lines.push('  #' + n.id + ' at ' + (n.schedule?.at || n.schedule?.every || 'unknown'));
+        });
+      }
+    }
+  }catch(e){
+    lines.push('Error: ' + e.message);
+  }
+  alert('Notification Debug Info:\n\n' + lines.join('\n'));
+}
+
 // ── Detect Capacitor runtime ──────────────────
 // Uses the GLOBAL window.Capacitor object injected by the native bridge
 // This works without any bundler or ES module imports
 function detectCapacitor(){
   try{
     const cap = window.Capacitor;
+    console.log('Capacitor debug:', {
+      exists: !!cap,
+      isNative: cap?.isNativePlatform?.(),
+      platform: cap?.getPlatform?.(),
+      pluginHeaders: cap?.PluginHeaders,
+      plugins: cap?.Plugins ? Object.keys(cap.Plugins) : [],
+      androidBridge: !!window.Capacitor?.androidBridge
+    });
     if(cap && cap.isNativePlatform && cap.isNativePlatform()){
       isCapacitor = true;
       console.log('Running in Capacitor native mode');
       // Check existing permission
       const LocalNotifications = getLocalNotifications();
+      console.log('LocalNotifications plugin:', LocalNotifications ? 'FOUND' : 'NOT FOUND');
       if(LocalNotifications){
         LocalNotifications.checkPermissions().then(permStatus=>{
+          console.log('Permission status:', permStatus);
           notifPermissionGranted = (permStatus.display === 'granted');
           updateNotifBtn();
           render();
