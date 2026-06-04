@@ -911,6 +911,11 @@ function saveModal(){
     sortTasksByTime(templates[dn]);
     editingTemplateTask=null;
     save();closeModal();render();
+    // Re-schedule reminders if this template affects today
+    const todayDn=dayOf(todayStr());
+    if(dn===todayDn&&notifPermissionGranted&&isCapacitor){
+      scheduleTodayReminders(true);
+    }
     return;
   }
 
@@ -923,7 +928,7 @@ function saveModal(){
   save();closeModal();render();
   // Re-schedule reminders if editing today
   if(ds===todayStr()&&notifPermissionGranted&&isCapacitor){
-    scheduleTodayReminders();
+    scheduleTodayReminders(true);
   }
 }
 function delTask(ds,dn,i){
@@ -934,7 +939,7 @@ function delTask(ds,dn,i){
   delete comp[tk(ds,dn,i)];
   save();render();toast('Deleted');
   if(ds===todayStr()&&notifPermissionGranted&&isCapacitor){
-    scheduleTodayReminders();
+    scheduleTodayReminders(true);
   }
 }
 function resetDay(){
@@ -942,6 +947,10 @@ function resetDay(){
   if(!confirm(`Reset ${dn} to default?`))return;
   delete custom[`${ds}_${dn}`];
   save();render();toast('Reset to default');
+  // Re-schedule reminders if resetting today
+  if(ds===todayStr()&&notifPermissionGranted&&isCapacitor){
+    scheduleTodayReminders(true);
+  }
 }
 
 // ── TEMPLATES ──────────────────────────────────
@@ -1070,6 +1079,10 @@ function delTemplateTask(dn,i){
   if(!templates[dn])templates[dn]=[...(BP[dn]||[])];
   templates[dn].splice(i,1);
   save();render();toast('Template task deleted');
+  // Re-schedule reminders if this template affects today
+  if(dn===dayOf(todayStr())&&notifPermissionGranted&&isCapacitor){
+    scheduleTodayReminders(true);
+  }
 }
 
 function resetTemplateDay(){
@@ -1077,6 +1090,10 @@ function resetTemplateDay(){
   if(!confirm(`Reset ${dn} template to default?`))return;
   delete templates[dn];
   save();render();toast('Template reset to default');
+  // Re-schedule reminders if this template affects today
+  if(dn===dayOf(todayStr())&&notifPermissionGranted&&isCapacitor){
+    scheduleTodayReminders(true);
+  }
 }
 
 // ── STATS ─────────────────────────────────────
@@ -1266,7 +1283,7 @@ async function requestCapacitorPermission(){
 }
 
 // ── Schedule today's reminders via AlarmManager ─
-async function scheduleTodayReminders(){
+async function scheduleTodayReminders(skipRender=false){
   if(!isCapacitor||!notifPermissionGranted) return;
   try{
     const LocalNotifications = getLocalNotifications();
@@ -1342,7 +1359,7 @@ async function scheduleTodayReminders(){
       localStorage.removeItem("rt_reminder_times");
     }
     save();
-    render();
+    if(!skipRender) render();
     if(scheduledCount>0){
       // Find the next one for the toast message
       const now2=new Date();
